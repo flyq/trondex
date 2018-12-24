@@ -149,21 +149,57 @@ interface IERC20 {
 
     function transferFrom(address from, address to, uint256 value) external returns (bool);
 
+    function symbol() external view returns (string);
+
     event Transfer(address indexed from, address indexed to, uint256 value);
 
     event Approval(address indexed owner, address indexed spender, uint256 value);
 }
 
 
-interface Iexchange {
-    function addfav(string symbol, address contractAddr) external;
-    function removefav(string symbol, address contractAddr) external;
-    function cancelsell(address account, string symbol, uint256 id) external;
-    function cancelbuy(address account, string symbol, uint256 id) external;
-    function setwhitelist(string symbol, address account) external;
-    function rmwhitelist(string symbol) external;
-    function transferTRC20(address contractAddr, uint256 amount) external;
+/**
+ * @title ERC721 Non-Fungible Token Standard basic interface
+ * @dev see https://github.com/ethereum/EIPs/blob/master/EIPS/eip-721.md
+ */
+contract IERC721 {
+    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
+    event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
+
+    function balanceOf(address owner) public view returns (uint256 balance);
+    function ownerOf(uint256 tokenId) public view returns (address owner);
+
+    function approve(address to, uint256 tokenId) public;
+    function getApproved(uint256 tokenId) public view returns (address operator);
+
+    function setApprovalForAll(address operator, bool _approved) public;
+    function isApprovedForAll(address owner, address operator) public view returns (bool);
+
+    function transferFrom(address from, address to, uint256 tokenId) public;
+    function safeTransferFrom(address from, address to, uint256 tokenId) public;
+
+    function safeTransferFrom(address from, address to, uint256 tokenId, bytes data) public;
 }
+
+
+interface IExchange {
+    function addfav(address contractAddr) external;
+    function removefav(address contractAddr) external;
+    function buyByTRX(address askContractAddr, uint256 askAmount) external payable;
+    function buyByERC20Token(address askContractAddr, uint256 askAmount, address bidContractAddr, uint256 bidAmount) external;
+    function sellForTRX(uint256 askTRXAmount, address bidContractAddr, uint256 bidAmount) external;
+    function cancelSell(address bidContractAddr, uint256 id) external;
+    function cancelBuy(address askContractAddr, uint256 id) external;
+    function setWhitelist(address contractAddr) external;
+    function rmWhitelist(address contractAddr) external;
+    function isInWhitelist(address contractAddr) external;
+
+    function transferERC721Token(address contractAddr, uint256 tokenId) external;
+    function transferERC20Token(address contractAddr, uint256 amount) external;
+    function transferTRX(uint256 amount) external;
+}
+
+
 contract PauserRole {
     using Roles for Roles.Role;
 
@@ -259,3 +295,147 @@ contract Pausable is PauserRole {
     }
 }
 
+
+contract Exchange is Pausable, IExchange {
+    using SafeMath for uint256;
+    using Address for address;
+
+
+    // 如果是trx，则contractAddr为address(1);
+    struct Token {
+        address contractAddr;
+        uint256 amount;
+    }
+    mapping(address => mapping(uint256 => Token)) public tranx;
+    mapping(address => bool) public whitelist;
+
+
+    event Addfav(string indexed symbol, address indexed contractAddr, address indexed account);
+    event Removefav(string indexed symbol, address indexed contractAddr, address indexed account);
+    event BuyByTRX(address indexed askContractAddr, uint256 askAmount, uint256 indexed bidTRXAmount, address indexed account);
+    event BuyByERC20Token(address indexed askContractAddr, uint256 askAmount, address indexed bidContractAddr, uint256 bidAmount, address indexed account);
+    event SellForTRX(uint256 askTRXAmount, address bidContractAddr, uint256 bidAmount, address indexed account);
+    event CancelSell(address bidContractAddr, uint256 id, address account);
+    event CancelBuy(address askContractAddr, uint256 id, address account);
+    event SetWhitelist(address contractAddr);
+    event RmWhitelist(address contractAddr);
+    event TransferERC721Token(address contractAddr, uint256 tokenId);
+    event TransferERC20Token(address contractAddr, address to);
+    event TransferTRX(uint256 amount, address to);
+    
+    constructor() public {}
+    
+    function transferERC721Token(address contractAddr, uint256 tokenId) public onlyPauser {
+        require(contractAddr.isContract());
+        IERC721 _tokenobj = IERC721(contractAddr);
+        _tokenobj.safeTransferFrom(address(this), msg.sender, tokenId);
+
+        emit TransferERC721Token(contractAddr, tokenId);
+    }
+
+    function transferERC20Token(address contractAddr, uint256 amount) public onlyPauser {
+        require(contractAddr.isContract());
+        IERC20 _tokenobj = IERC20(contractAddr);
+        _tokenobj.transfer(msg.sender, amount);
+
+        emit TransferERC20Token(contractAddr, msg.sender);
+    }
+
+    function transferTRX(uint256 amount) public onlyPauser {
+        msg.sender.transfer(amount);
+
+        emit TransferTRX(amount, msg.sender);
+    }
+
+    function addfav(address contractAddr) public {
+        IERC20 _tokenobj = IERC20(contractAddr);
+        string memory _symbol = _tokenobj.symbol();
+
+        emit Addfav(_symbol, contractAddr, msg.sender);
+    }
+
+    function removefav(address contractAddr) public {
+        IERC20 _tokenobj = IERC20(contractAddr);
+        string memory _symbol = _tokenobj.symbol();
+
+        emit Removefav(_symbol, contractAddr, msg.sender);        
+    }
+
+    function buyByTRX(address askContractAddr, uint256 askAmount) public payable whenNotPaused {
+        require(msg.value > 0);
+        require(askAmount > 0);
+        require(isInWhitelist(askContractAddr));
+
+        Token memory _token = Token({contractAddr:address(1), amount:msg.value});
+        tranx[msg.sender][block.number] = _token;
+
+        emit BuyByTRX(askContractAddr, askAmount, msg.value, msg.sender);
+    }
+
+    function buyByERC20Token(
+        address askContractAddr, 
+        uint256 askAmount, 
+        address bidContractAddr,
+        uint256 bidAmount
+        )
+        public
+        whenNotPaused
+    {
+        require(isInWhitelist(askContractAddr) && isInWhitelist(bidContractAddr));
+        require(askAmount > 0 && bidAmount > 0);
+
+        IERC20 _tokenobj = IERC20(bidContractAddr);
+        _tokenobj.transferFrom(msg.sender, address(this), bidAmount);
+
+        Token memory _token = Token({contractAddr:bidContractAddr, amount:bidAmount});
+        tranx[msg.sender][block.number] = _token;
+
+        emit BuyByERC20Token(askContractAddr, askAmount, bidContractAddr, bidAmount, msg.sender);
+    }
+
+    function sellForTRX(uint256 askTRXAmount, address bidContractAddr, uint256 bidAmount) 
+        public
+        whenNotPaused
+    {
+        require(isInWhitelist(bidContractAddr));
+        require(askTRXAmount > 0 && bidAmount > 0);
+        
+        IERC20 _tokenobj = IERC20(bidContractAddr);
+        _tokenobj.transferFrom(msg.sender, address(this), bidAmount);
+
+        emit SellForTRX(askTRXAmount, bidContractAddr, bidAmount, msg.sender);
+    }
+
+    function cancelSell(address bidContractAddr, uint256 id) public whenNotPaused {
+        require(isInWhitelist(bidContractAddr));
+
+        emit CancelSell(bidContractAddr, id, msg.sender);
+    }
+
+    function cancelBuy(address askContractAddr, uint256 id) public whenNotPaused {
+        require(isInWhitelist(askContractAddr));
+
+        emit CancelBuy(askContractAddr, id, msg.sender);
+    }
+
+    function setWhitelist(address contractAddr) public onlyPauser {
+        require(contractAddr.isContract());
+        require(!whitelist[contractAddr]);
+
+        whitelist[contractAddr] = true;
+
+        emit SetWhitelist(contractAddr);
+    }
+
+    function rmWhitelist(address contractAddr) public onlyPauser {
+        require(whitelist[contractAddr]);
+
+        whitelist[contractAddr] = false;
+
+        emit RmWhitelist(contractAddr);
+    }
+
+    function isInWhitelist(address contractAddr) public view returns(bool) {
+        return whitelist[contractAddr];
+    }
+}
