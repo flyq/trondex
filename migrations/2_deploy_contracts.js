@@ -1,5 +1,5 @@
 var Migrations = artifacts.require("./Migrations.sol");
-var Cryptomeetup = artifacts.require("./Cryptomeetup.sol");
+var Cryptomeetup = artifacts.require("./Exchange.sol");
 
 module.exports = function(deployer) {
     deployer.deploy(Migrations);
